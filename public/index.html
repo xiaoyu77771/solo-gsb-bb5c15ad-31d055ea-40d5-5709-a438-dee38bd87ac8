@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <h1>单张纸直线裁切试排</h1>
-    <p class="subtitle">断头台式裁切 · 每次一刀切到底、一分为二 · 成品允许旋转 90°（受纹向约束） · 刀缝不侵占成品 · 单张试排三策略方案比选 · 支持批量排产与多纸型成本排产</p>
+    <p class="subtitle">断头台式裁切 · 每次一刀切到底、一分为二 · 成品允许旋转 90°（受纹向约束） · 刀缝不侵占成品 · 单张试排三策略方案比选 · 支持批量排产、多纸型成本排产与叠纸裁切排程</p>
   </header>
 
   <main class="layout">
@@ -123,6 +123,20 @@
       <div id="batchBar" class="batch-bar" hidden></div>
       <div id="costBar" class="batch-bar" hidden></div>
       <div id="kitProgress" class="kit-progress" hidden></div>
+      <div id="stackPanel" class="stack-panel" hidden>
+        <h3>叠纸裁切排程</h3>
+        <div class="stack-controls">
+          <label>叠纸上限（张/批）
+            <input type="number" id="stackLimit" value="3" min="1" max="500" step="1" />
+          </label>
+          <button type="button" id="stackGenerate" class="btn btn-primary">生成排程</button>
+          <p class="hint">复用当前批量 / 多纸型排产结果，把各张纸的断头台切割树合成可执行刀次：
+            仅当待切区域<b>宽高、刀向、刀位、刀缝</b>一致时合并，每批不超过叠纸上限；
+            子刀必须等所在纸张的父刀完成后才可入批。每轮优先合并张数最多、再按总切线长度、纸张序号与原刀序决胜。</p>
+        </div>
+        <div id="stackError" class="form-error" hidden></div>
+        <div id="stackResult" class="stack-result" hidden></div>
+      </div>
       <div id="orderSummary" class="order-summary" hidden></div>
       <div id="sheetTabs" class="sheet-tabs" hidden></div>
       <div id="sheetMeta" class="sheet-meta" hidden></div>

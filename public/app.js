@@ -551,6 +551,7 @@ function clearCompareUi() {
   compareState = null;
   $('compareBar').hidden = true;
   $('compareBar').innerHTML = '';
+  clearStackUi();
 }
 
 /* ---------------- 批量排产 ---------------- */
@@ -698,6 +699,7 @@ function renderBatch(data) {
 
   renderOrderSummary(data);
   renderKitProgress(data);
+  if (data.sheets.length) showStackPanel(data); else clearStackUi();
 
   renderSheetTabs(data.sheets, (sh, i) => {
     const kitTag = data.kit ? ` · ${sh.sets} 套` : '';
@@ -742,6 +744,7 @@ function clearBatchUi() {
   $('batchBar').innerHTML = '';
   clearOrderSummary();
   clearKitProgress();
+  clearStackUi();
 }
 
 /* ---------------- 多纸型成本排产 ---------------- */
@@ -829,6 +832,7 @@ function renderCost(data) {
 
   renderOrderSummary(data);
   renderKitProgress(data);
+  if (data.sheets.length) showStackPanel(data); else clearStackUi();
 
   renderSheetTabs(data.sheets, (sh) => {
     const kitTag = data.kit ? ` · ${sh.sets} 套` : '';
@@ -940,6 +944,198 @@ function clearCostUi() {
   $('rankList').innerHTML = '';
   clearOrderSummary();
   clearKitProgress();
+  clearStackUi();
+}
+
+/* ---------------- 叠纸裁切排程（复用批量/成本结果） ---------------- */
+
+let stackState = null;      // 最近一次叠纸排程结果
+let stackSourceData = null; // 排程所复用的批量/成本结果
+
+/** 把批量/成本结果压缩为排程接口所需纸张（只带 paper 与切割树） */
+function buildStackSheets(data) {
+  const isCost = !!data && Array.isArray(data.sheets) && data.sheets.some((s) => s && s.layout);
+  return {
+    source: isCost ? 'cost' : 'batch',
+    sheets: data.sheets.map((sh) => {
+      const layout = isCost ? sh.layout : sh;
+      const compact = {
+        paper: layout.paper,
+        cuts: layout.cuts.map((c) => ({
+          n: c.n, depth: c.depth, orient: c.orient, region: c.region, band: c.band,
+        })),
+      };
+      if (isCost) {
+        compact.round = sh.round;
+        compact.paperId = sh.paperId;
+        compact.paperName = sh.paperName;
+      }
+      if (sh.orderNo !== undefined) compact.orderNo = sh.orderNo;
+      return compact;
+    }),
+  };
+}
+
+function showStackPanel(data) {
+  stackSourceData = data;
+  stackState = null;
+  $('stackResult').hidden = true;
+  $('stackResult').innerHTML = '';
+  $('stackError').hidden = true;
+  $('stackError').textContent = '';
+  $('stackPanel').hidden = false;
+}
+
+function clearStackUi() {
+  stackState = null;
+  stackSourceData = null;
+  $('stackPanel').hidden = true;
+  $('stackResult').hidden = true;
+  $('stackResult').innerHTML = '';
+  $('stackError').hidden = true;
+  $('stackError').textContent = '';
+}
+
+const STACK_REASON_LABEL = {
+  solo: '单张独刀',
+  'stack-limit': '受叠纸上限制约',
+  'waiting-parent': '等待父刀',
+  'no-cuts': '无需切割',
+};
+
+function renderStack(data) {
+  stackState = data;
+  const s = data.summary;
+  const sheetByIdx = new Map(data.sheets.map((sh) => [sh.index, sh]));
+
+  // 批次表
+  const batchRows = data.batches.map((b) => {
+    const papers = b.members.map((m) => {
+      const sh = sheetByIdx.get(m.sheetIndex);
+      return `${sh ? sh.index : m.sheetIndex}#${m.cutNo}`;
+    }).join('、');
+    return `
+      <tr class="${b.sheetCount > 1 ? 'merged' : 'solo'}">
+        <td><b>${b.batchNo}</b></td>
+        <td>${b.orient === 'v' ? '竖切 ↑↓' : '横切 ←→'}</td>
+        <td class="num">${fmt(b.region.w)}×${fmt(b.region.h)}</td>
+        <td class="num">${fmt(b.position)}</td>
+        <td class="num">${fmt(b.kerf)}</td>
+        <td class="num">${fmt(b.cutLength)}</td>
+        <td class="num"><b>${b.sheetCount}</b>${b.capped ? ' <span class="cap-tag">封顶</span>' : ''}</td>
+        <td class="num">${fmt(b.totalLength)}</td>
+        <td>${papers}</td>
+      </tr>`;
+  }).join('');
+
+  // 每张纸进度
+  const sheetRows = data.sheets.map((sh) => {
+    const pct = sh.cutsTotal > 0 ? (sh.cutsScheduled / sh.cutsTotal) * 100 : 100;
+    const order = sh.orderNo ? ` <span class="stack-order">订单:${sh.orderNo}</span>` : '';
+    const paperName = sh.paperName
+      ? `<span class="paper-cell"><span class="dot" style="background:${sh.paperId ? colorFor(sh.paperId) : '#adb5bd'}"></span>${sh.paperName}${sh.paperId ? `（${sh.paperId}）` : ''}</span>`
+      : '—';
+    return `
+      <tr class="${sh.hasCuts ? '' : 'nocuts'}">
+        <td>${sh.index}</td>
+        <td>${paperName}${order}</td>
+        <td class="num">${fmt(sh.paperWidth)}×${fmt(sh.paperHeight)}</td>
+        <td class="num">${sh.cutsTotal}</td>
+        <td class="num">${sh.cutsScheduled}</td>
+        <td class="num">${sh.mergedCutCount} / ${sh.soloCutCount}</td>
+        <td>
+          <div class="stack-bar"><span style="width:${pct.toFixed(1)}%"></span></div>
+          <span class="stack-batches">${sh.batchNos.join('、') || '—'}</span>
+        </td>
+      </tr>`;
+  }).join('');
+
+  // 未排原因（诊断）
+  const unmergedBlock = data.unmerged.length
+    ? `
+      <h4>未排原因 / 合批诊断（${data.unmerged.length} 条）</h4>
+      <table class="stack-unmerged">
+        <thead><tr><th>纸张</th><th>原刀号</th><th>原因</th><th>说明</th><th>所在批次</th></tr></thead>
+        <tbody>
+          ${data.unmerged.map((u) => `
+            <tr class="${u.reason}">
+              <td>${u.sheetIndex}</td>
+              <td>${u.cutNo == null ? '—' : `#${u.cutNo}`}</td>
+              <td><span class="reason-tag r-${u.reason}">${STACK_REASON_LABEL[u.reason] || u.reason}</span></td>
+              <td>${u.detail}</td>
+              <td>${u.batchNo != null ? u.batchNo : '—'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`
+    : '<p class="badge-ok">✔ 所有刀次均完成合批，没有单刀/推迟项。</p>';
+
+  $('stackResult').innerHTML = `
+    <div class="stack-summary stats">
+      <div class="stat">纸张：<b>${s.sheetsWithCuts}</b>${s.sheetsTotal !== s.sheetsWithCuts ? ` / ${s.sheetsTotal}` : ''} 张有刀</div>
+      <div class="stat">总刀数：<b>${s.cutsTotal}</b></div>
+      <div class="stat">刀次（批）：<b>${s.batchesTotal}</b></div>
+      <div class="stat">合批 / 独刀批：<b>${s.mergedBatches}</b> / ${s.soloBatches}</div>
+      <div class="stat">单批最多叠：<b>${s.maxSheetsPerBatch}</b> 张（上限 ${data.stackLimit}）</div>
+      <div class="stat">总切线长度：<b>${fmt(s.totalLength)}</b> mm</div>
+    </div>
+    <h4>刀次批次表（${data.batches.length} 批）</h4>
+    <div class="stack-table-wrap">
+      <table class="stack-batches">
+        <thead><tr>
+          <th>批次</th><th>刀向</th><th>待切区域 宽×高 (mm)</th><th>刀位 (mm)</th>
+          <th>刀缝 (mm)</th><th>切线长 (mm)</th><th>叠纸张数</th><th>批切线总长 (mm)</th>
+          <th>所含纸张/原刀号（纸#刀）</th>
+        </tr></thead>
+        <tbody>${batchRows}</tbody>
+      </table>
+    </div>
+    <h4>每张纸裁切进度</h4>
+    <div class="stack-table-wrap">
+      <table class="stack-sheets">
+        <thead><tr>
+          <th>纸张序号</th><th>纸型 / 订单</th><th>纸面 宽×高</th>
+          <th>总刀数</th><th>已排刀数</th><th>合批刀 / 独刀</th><th>所在批次（顺序）</th>
+        </tr></thead>
+        <tbody>${sheetRows}</tbody>
+      </table>
+    </div>
+    ${unmergedBlock}
+  `;
+  $('stackResult').hidden = false;
+}
+
+async function generateStack() {
+  const errBox = $('stackError');
+  errBox.hidden = true;
+  errBox.textContent = '';
+  if (!stackSourceData || !stackSourceData.sheets || !stackSourceData.sheets.length) {
+    errBox.textContent = '当前没有可复用的批量 / 多纸型排产结果，请先生成排产方案。';
+    errBox.hidden = false;
+    return;
+  }
+  const stackLimit = Number($('stackLimit').value);
+  if (!(Number.isInteger(stackLimit) && stackLimit >= 1 && stackLimit <= 500)) {
+    errBox.textContent = '叠纸上限须为 1～500 的整数。';
+    errBox.hidden = false;
+    return;
+  }
+  const payload = { ...buildStackSheets(stackSourceData), stackLimit };
+  $('stackGenerate').disabled = true;
+  try {
+    const resp = await fetch('/api/layout/stack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || '排程失败');
+    renderStack(data);
+  } catch (e) {
+    errBox.textContent = e.message;
+    errBox.hidden = false;
+  } finally {
+    $('stackGenerate').disabled = false;
+  }
 }
 
 /* ---------------- 逐张标签（批量/成本共用） ---------------- */
@@ -1034,7 +1230,10 @@ document.querySelectorAll('input[name="mode"]').forEach((r) =>
     // 订单隔离与成套生产仅对批量 / 多纸型排产有意义
     $('isolateOpts').hidden = mode === 'single';
     $('kitOpts').hidden = mode === 'single';
-    if (mode === 'single') setKitMode(false);
+    if (mode === 'single') {
+      setKitMode(false);
+      $('stackPanel').hidden = true; // 叠纸排程仅复用批量 / 多纸型结果
+    }
     // 成本模式下纸张宽高、纹向与常用纸度不适用（候选在纸型表格中录入）
     $('paperWLabel').hidden = cost;
     $('paperHLabel').hidden = cost;
@@ -1055,6 +1254,7 @@ $('kitMode').addEventListener('change', (e) => {
 });
 $('addRow').addEventListener('click', () => addProductRow());
 $('addPaper').addEventListener('click', () => addPaperRow());
+$('stackGenerate').addEventListener('click', generateStack);
 $('clearBtn').addEventListener('click', () => {
   $('productRows').innerHTML = '';
   addProductRow();

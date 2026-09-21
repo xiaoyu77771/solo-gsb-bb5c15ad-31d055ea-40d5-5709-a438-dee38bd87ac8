@@ -4,11 +4,13 @@ const path = require('node:path');
 const express = require('express');
 const { layout, layoutBatch, layoutCompare } = require('./src/packer');
 const { layoutCostBatch } = require('./src/cost');
+const { stackSchedule } = require('./src/stack');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: '256kb' }));
+// 叠纸排程会回传多张纸的完整切割树（最多 500 张），放宽请求体上限
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/health', (_req, res) => {
@@ -52,6 +54,18 @@ app.post('/api/layout/cost', (req, res) => {
   try {
     const body = req.body || {};
     const result = layoutCostBatch(body);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || '输入无效' });
+  }
+});
+
+// 叠纸裁切排程：复用批量/多纸型排产结果，把各张纸的断头台切割树
+// 按合批规则（区域宽高、刀向、刀位、刀缝一致）与父刀先后约束转换为刀次
+app.post('/api/layout/stack', (req, res) => {
+  try {
+    const body = req.body || {};
+    const result = stackSchedule(body);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message || '输入无效' });
