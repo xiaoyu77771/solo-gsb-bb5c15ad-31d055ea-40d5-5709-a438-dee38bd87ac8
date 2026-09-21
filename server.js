@@ -4,9 +4,22 @@ const path = require('node:path');
 const express = require('express');
 const { layout, layoutBatch, layoutCompare } = require('./src/packer');
 const { layoutCostBatch } = require('./src/cost');
+const { scheduleStack } = require('./src/schedule');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+
+// 叠纸裁切排程需回传整批刀次，单独放宽该路由的 JSON 体积限制
+// （挂载在全局 256kb 限制之前；该路由解析后全局解析器会自动跳过）
+app.post('/api/layout/schedule', express.json({ limit: '16mb' }), (req, res) => {
+  try {
+    const body = req.body || {};
+    const result = scheduleStack(body);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || '输入无效' });
+  }
+});
 
 app.use(express.json({ limit: '256kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -58,8 +71,10 @@ app.post('/api/layout/cost', (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`单张纸裁切试排服务已启动: http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`单张纸裁切试排服务已启动: http://localhost:${PORT}`);
+  });
+}
 
 module.exports = app;

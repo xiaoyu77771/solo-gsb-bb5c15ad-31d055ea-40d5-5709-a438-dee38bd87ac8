@@ -725,6 +725,9 @@ function renderBatch(data) {
       '未排完的成品（剩余需求）'
     );
   }
+
+  // 叠纸裁切排程入口（复用本次批量结果的各张刀次）
+  showScheduleBar(data.sheets.map((sh) => ({ cuts: sh.cuts })));
 }
 
 function showBatchSheet(i) {
@@ -742,6 +745,7 @@ function clearBatchUi() {
   $('batchBar').innerHTML = '';
   clearOrderSummary();
   clearKitProgress();
+  clearScheduleUi();
 }
 
 /* ---------------- 多纸型成本排产 ---------------- */
@@ -858,6 +862,12 @@ function renderCost(data) {
       '未排完的成品（剩余需求）'
     );
   }
+
+  // 叠纸裁切排程入口（复用本次成本结果的各张刀次，保留纸型名称）
+  showScheduleBar(data.sheets.map((sh) => ({
+    cuts: sh.layout.cuts,
+    paperName: sh.paperName,
+  })));
 }
 
 function showCostSheet(i) {
@@ -940,6 +950,124 @@ function clearCostUi() {
   $('rankList').innerHTML = '';
   clearOrderSummary();
   clearKitProgress();
+  clearScheduleUi();
+}
+
+/* ---------------- 叠纸裁切排程 ---------------- */
+
+let scheduleSource = null; // 最近一次批量/成本排产结果（仅保留排程所需字段）
+
+// 在批量 / 成本结果旁提供叠纸上限与「生成排程」入口
+function showScheduleBar(sheets) {
+  scheduleSource = sheets;
+  $('scheduleResult').hidden = true;
+  $('scheduleResult').innerHTML = '';
+  $('scheduleBar').hidden = !sheets || sheets.length === 0;
+}
+
+function clearScheduleUi() {
+  scheduleSource = null;
+  $('scheduleBar').hidden = true;
+  $('scheduleResult').hidden = true;
+  $('scheduleResult').innerHTML = '';
+}
+
+async function generateSchedule() {
+  const errBox = $('formError');
+  errBox.hidden = true;
+  if (!scheduleSource || !scheduleSource.length) return;
+  const stackLimit = Number($('stackLimit').value);
+  if (!Number.isInteger(stackLimit) || stackLimit < 1 || stackLimit > 500) {
+    errBox.textContent = '叠纸上限须为 1～500 的整数。';
+    errBox.hidden = false;
+    return;
+  }
+  $('genSchedule').disabled = true;
+  try {
+    const resp = await fetch('/api/layout/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stackLimit, sheets: scheduleSource }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || '排程失败');
+    renderSchedule(data);
+  } catch (e) {
+    errBox.textContent = e.message;
+    errBox.hidden = false;
+  } finally {
+    $('genSchedule').disabled = false;
+  }
+}
+
+function renderSchedule(data) {
+  const s = data.summary;
+  const batchRows = data.batches.map((b) => {
+    const members = b.cuts.map((c) => `第${c.sheet}张#${c.cutNo}`).join('、');
+    return `
+      <tr>
+        <td><b>${b.batchNo}</b></td>
+        <td>${orientLabel(b.orient)}</td>
+        <td>${fmt(b.region.w)}×${fmt(b.region.h)}</td>
+        <td class="num">${fmt(b.position)}</td>
+        <td class="num">${fmt(b.kerf)}</td>
+        <td class="num">${fmt(b.length)}</td>
+        <td class="num"><b>${b.sheetCount}</b></td>
+        <td class="num">${fmt(b.totalLength)}</td>
+        <td class="members">${members}</td>
+      </tr>`;
+  }).join('');
+
+  const sheetRows = data.sheets.map((sh) => `
+    <tr class="${sh.done ? 'done' : ''}">
+      <td>第 ${sh.sheet} 张${sh.paperName ? `（${sh.paperName}）` : ''}</td>
+      <td class="num">${sh.scheduled} / ${sh.cutsTotal}</td>
+      <td>${sh.batches.length ? sh.batches.map((n) => `批${n}`).join('、') : '—'}</td>
+      <td>${sh.done ? '✔ 完成' : '未排完'}</td>
+    </tr>`).join('');
+
+  const unscheduledBlock = data.unscheduled.length
+    ? `
+      <h4>未排刀次</h4>
+      <table class="unsched">
+        <thead><tr><th>纸张</th><th class="num">原刀号</th><th>未排原因</th></tr></thead>
+        <tbody>
+          ${data.unscheduled.map((u) => `
+            <tr>
+              <td>第 ${u.sheet} 张</td>
+              <td class="num">${u.cutNo}</td>
+              <td>${u.reason}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`
+    : '';
+
+  $('scheduleResult').innerHTML = `
+    <h3>叠纸裁切排程（叠纸上限 ${data.stackLimit} 张/刀）</h3>
+    <div class="stats">
+      <div class="stat">批次总数：<b>${s.batchesTotal}</b></div>
+      <div class="stat">排程刀次：<b>${s.scheduledCuts}</b> / ${s.cutsTotal}</div>
+      <div class="stat">最大叠纸：<b>${s.maxStack}</b> 张/刀</div>
+      <div class="stat">节省刀次：<b>${s.savedPasses}</b>（相对逐张单刀 ${s.scheduledCuts} 刀）</div>
+    </div>
+    <h4>批次表（每批一刀，叠切同批各张）</h4>
+    <table>
+      <thead><tr>
+        <th>批次</th><th>刀向</th><th>待切区域 宽×高 (mm)</th><th class="num">刀位 (mm)</th>
+        <th class="num">刀缝 (mm)</th><th class="num">切线长 (mm)</th>
+        <th class="num">张数</th><th class="num">总切线长 (mm)</th><th>所含纸张·原刀号</th>
+      </tr></thead>
+      <tbody>${batchRows}</tbody>
+    </table>
+    <h4>每张纸进度</h4>
+    <table>
+      <thead><tr><th>纸张</th><th class="num">已排程刀次</th><th>涉及批次</th><th>状态</th></tr></thead>
+      <tbody>${sheetRows}</tbody>
+    </table>
+    ${unscheduledBlock}
+  `;
+  $('scheduleResult').hidden = false;
+  $('scheduleResult').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 /* ---------------- 逐张标签（批量/成本共用） ---------------- */
@@ -1062,6 +1190,7 @@ $('clearBtn').addEventListener('click', () => {
   addProductRow();
 });
 $('generate').addEventListener('click', generate);
+$('genSchedule').addEventListener('click', generateSchedule);
 
 // 初始示例：大度全张 889×1194，刀缝 3mm
 addProductRow('封面', '', 210, 285, 12);
